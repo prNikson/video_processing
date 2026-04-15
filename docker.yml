@@ -1,0 +1,20 @@
+services:
+  whisper:
+    image: onerahmet/openai-whisper-asr-webservice:latest-gpu
+    container_name: whisper-asr
+    ports:
+      - "9000:9000"
+    environment:
+      - ASR_MODEL=turbo
+      - ASR_ENGINE=openai_whisper
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+networks:
+  default:
+    name: ai_network

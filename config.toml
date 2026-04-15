@@ -1,0 +1,6 @@
+[config]
+whisper_url = "http://0.0.0.0:9000/asr"
+qwen_url = "http://localhost:8000/v1/chat/completions"
+
+[model]
+video = Qwen/Qwen3.5-VL-4B-Instruct
