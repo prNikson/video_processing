@@ -1,7 +1,36 @@
 services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-qwen
+    ports:
+      - "8000:8000"
+    volumes:
+      - /home/ubuntu/vllm_test:/data
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+    command: >
+      --model Qwen/Qwen3.5-2B
+      --trust-remote-code
+      --max-model-len 12000
+      --allowed-local-media-path /data
+      --gpu-memory-utilization 0.65
+      --max-num-seqs 1
+
   whisper:
     image: onerahmet/openai-whisper-asr-webservice:latest-gpu
-    container_name: whisper-asr
+    container_name: whisper
     ports:
       - "9000:9000"
     environment:
@@ -14,6 +43,56 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+  ocr-api:
+    build: ./ocr_service
+    container_name: paddleocr
+    ports:
+      - "8010:8010"
+    environment:
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  embedding:
+    image: vllm/vllm-openai:latest
+    container_name: qwen_embedding
+    ports:
+      - "8888:8888"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    command: >
+      --model Qwen/Qwen3-Embedding-0.6B
+      --port 8888
+      --host 0.0.0.0
+      --task embed
+      --trust-remote-code
+    profiles:
+      - embed
+    restart: unless-stopped
 
 networks:
   default:

@@ -1,46 +1,155 @@
+import os
 import requests
+import tomllib
+import uuid
+import time
+import subprocess
+import docker
+import torch
+import cv2
+import numpy as np
 from moviepy import VideoFileClip
+from sklearn.metrics.pairwise import cosine_similarity
+
+from embeddings import SimpleEmbedding
+from get_video import get_video_pair
 
 
-WHISPER_URL = "http://0.0.0.0:9000/asr"
-VLLM_URL = "http://localhost:8000/v1/chat/completions"
+class ProcessVideo:
+    def __init__(
+        self,
+        video_path,
+        description,
+        config_file='config.toml'
+    ):
+        self.video_path = video_path
+        self.video_description = description
+        self._read_config_file(config_file)
+        self.embedding = SimpleEmbedding(self.embed_url, self.embed_model)
 
-def extract_audio(video_path) -> str:
-    audioname = "1.mp3"
-    video = VideoFileClip(video_path)
-    audio = video.audio
-    audio.write_audiofile(audioname)
-    return audioname
+    def _read_config_file(self, config_file) -> None:
+        with open(config_file, 'rb') as f:
+            data = tomllib.load(f)
+            self.whisper_url = data['config']['whisper_url']
+            self.qwen_video_url = data['config']['qwen_video_url']
+            self.embed_url = data['config']['embed_url']
 
-def process_audio(video_path):
-    audio_path = extract_audio(video_path)
+            self.video_model = data['model']['video']
+            self.embed_model = data['model']['embed']
 
-    with open(audio_path, 'rb') as f:
-        files = {'audio_file': f, "task": "transcribe", "output": "json"}
-        transcript = requests.post(WHISPER_URL, files=files).text
-    return transcript
+            self.a = data['param']['video']
+            self.b = data['param']['transcribe']
+            self.c = data['param']['ocr']
+    def _clear_gpu_memory(self) -> None:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    
+    def _stop_service(self, service_name: str) -> None:
+        subprocess.run(["docker-compose", "stop", service_name], capture_output=True)
+        self._clear_gpu_memory()
+        time.sleep(2)
 
-def process_video(video_path):
-    vllm_payload = {
-        "model": "Qwen/Qwen3-VL-4B-Instruct",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this video"},
-                    {"type": "video_url", "video_url": {"url": f"file:////data/{video_path}"}, "max_pixels": 360 * 420, "fps": 1.0, "max_tokens": 512},
-                ]
-            }
-        ]
-    }
+    def _start_service(self, service_name: str) -> None:
+        subprocess.run(["docker-compose", "start", service_name], capture_output=True)
+        time.sleep(5)
 
-    visual_description = requests.post(VLLM_URL, json=vllm_payload).json()
-    return visual_description['choices'][0]['message']['content']
+    def _wait_for_service(self, url: str, max_retries: int = 30) -> None:
+        for i in range(max_retries):
+            try:
+                response = requests.get(f"{url}/health", timeout=2)
+                if response.status_code == 200:
+                    return True
+            except:
+                pass
+            time.sleep(2)
+        return False
+
+    def _extract_audio(self, video_path: str) -> bytes:
+        video = VideoFileClip(video_path)
+        audioname = f"{uuid.uuid4()}.mp3"
+        audio = video.audio
+        audio.write_audiofile(audioname)
+        return audioname
+
+    def _process_audio(self) -> str:
+        self._audio_path = self._extract_audio(self.video_path)
+
+        with open(self._audio_path, 'rb') as f:
+            files = {'audio_file': f, "task": "transcribe", "output": "json"}
+            transcript = requests.post(self.whisper_url, files=files).text
+        #self._stop_service('whisper')
+        return transcript
+
+    def _process_video_sense(self) -> str:
+        vllm_payload = {
+            #"model": "Qwen/Qwen3-VL-4B-Instruct",
+            "model": self.video_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this video"},
+                        {"type": "video_url", "video_url": {"url": f"file:////data/data/{self.video_path}"}, "max_pixels": 360 * 420, "fps": 1.0, "max_tokens": 1024},
+                    ]
+                }
+            ]
+        }
+
+        visual_description = requests.post(self.qwen_video_url, json=vllm_payload).json()
+        #self._stop_service('vllm-qwen')
+        return visual_description['choices'][0]['message']['content']
+
+    def _process_ocr(self) -> str:
+        cap = cv2.VideoCapture('data/' + self.video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        count = 0
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+
+            if count % 10 == 0:
+
+                _, img_encoded = cv2.imencode('.jpg', frame)
+
+                try:
+                    response = requests.post(
+                        "http://0.0.0.0:8010/ocr",
+                        files={"file": ("frame.jpg", img_encoded.tobytes(), "image/jpeg")}
+                    )
+                    print(response.json())
+                except Exception as e:
+                    print(e)
+            count += 1
+
+        cap.release()
+
+    def process_video(self):
+        self._process_ocr()
+       # print(self._get_embeddings())
+       # os.remove(self._audio_path)
+
+    def _get_embeddings(self):
+        #self._start_service("embedding")
+        self._wait_for_service(self.embed_url.replace("/v1/embeddings", "health"))
+
+        video_sense_embedding = self.embedding.get_embedding(self._process_video_sense())
+        audio_sense_embedding = self.embedding.get_embedding(self._process_audio())
+        description_embedding = self.embedding.get_embedding(self.video_description)
+
+        weighted = self.a * video_sense_embedding + self.b * audio_sense_embedding
+
+        similarity = cosine_similarity([weighted], [description_embedding])[0][0]
+        self._stop_service("embedding")
+        return similarity
+
+
 def main():
-    video_path = "fhd.mp4"
-    print(process_audio(video_path))
-    print(process_video(video_path))
+    video_path, description = get_video_pair()
 
+    handler = ProcessVideo(video_path, description)
+    handler.process_video()
 
 if __name__ == "__main__":
     main()
