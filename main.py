@@ -1,11 +1,12 @@
 import os
-import requests
 import tomllib
 import uuid
 import time
 import subprocess
+
 import docker
 import torch
+import requests
 import cv2
 import numpy as np
 from moviepy import VideoFileClip
@@ -40,6 +41,7 @@ class ProcessVideo:
             self.a = data['param']['video']
             self.b = data['param']['transcribe']
             self.c = data['param']['ocr']
+
     def _clear_gpu_memory(self) -> None:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -102,6 +104,7 @@ class ProcessVideo:
         return visual_description['choices'][0]['message']['content']
 
     def _process_ocr(self) -> str:
+        result = []
         cap = cv2.VideoCapture('data/' + self.video_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
         count = 0
@@ -109,19 +112,42 @@ class ProcessVideo:
         while cap.isOpened():
             ret, frame = cap.read()
 
+            if not ret:
+                break
+
             if count % 10 == 0:
+                if frame is not None:
+                    _, img_encoded = cv2.imencode('.jpg', frame)
 
-                _, img_encoded = cv2.imencode('.jpg', frame)
-
-                try:
-                    response = requests.post(
-                        "http://0.0.0.0:8010/ocr",
-                        files={"file": ("frame.jpg", img_encoded.tobytes(), "image/jpeg")}
-                    )
-                    print(response.json())
-                except Exception as e:
-                    print(e)
+                    try:
+                        response = requests.post(
+                            "http://0.0.0.0:8010/ocr",
+                            files={"file": ("frame.jpg", img_encoded.tobytes(), "image/jpeg")}
+                        )
+                        result.append(" ".join(response.json()))
+                    except Exception as e:
+                        print(e)
             count += 1
+        
+        result = " ".join(result)
+
+        payload = {
+            "model": self.video_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional editor and analyst with expertise in OCR error correction."
+                },
+                {
+                    "role": "user",
+                    "content": f"Clean:\n1.Analyze the provided OCR text and correct typos, character misrecognitions (e.g., '0' instead of 'O', '1' instead of 'l'), and punctuation errors. Ensure the text flows logically.\n2.Translate (if needed): If the text is not in English, translate the corrected version into fluent English.\n3.Summarize: Provide a concise summary of the key points in English.\n\nConstraints:\n1.Do not make up facts; if a word is completely illegible, mark it as [unintelligible].\n2.The summary should be structured (bullet points or a short paragraph).",
+                    "max_tokens": 1024
+                }
+            ]
+        }
+
+        ocr_description = requests.post(self.qwen_video_url, json=payload).json()
+        print(ocr_description['choices'][0]['message']['content'])
 
         cap.release()
 
