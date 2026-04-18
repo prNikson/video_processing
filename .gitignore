@@ -9,3 +9,7 @@ data
 
 # Virtual environments
 .venv
+README.md
+uv.lock
+pyproject.toml
+.python-version
