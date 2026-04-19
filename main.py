@@ -3,13 +3,14 @@ import tomllib
 import uuid
 import time
 import subprocess
+import json
 
 import docker
 import torch
 import requests
 import cv2
 import numpy as np
-from moviepy import VideoFileClip
+from concurrent.futures import ThreadPoolExecutor
 from sklearn.metrics.pairwise import cosine_similarity
 
 from embeddings import SimpleEmbedding
@@ -26,6 +27,7 @@ class ProcessVideo:
         self.video_path = video_path
         self.video_description = description
         self._read_config_file(config_file)
+        self.prompt = self._load_prompt()
         self.embedding = SimpleEmbedding(self.embed_url, self.embed_model)
 
     def _read_config_file(self, config_file) -> None:
@@ -34,6 +36,7 @@ class ProcessVideo:
             self.whisper_url = data['config']['whisper_url']
             self.qwen_video_url = data['config']['qwen_video_url']
             self.embed_url = data['config']['embed_url']
+            self.paddle_url = data['config']['paddle_url']
 
             self.video_model = data['model']['video']
             self.embed_model = data['model']['embed']
@@ -41,6 +44,12 @@ class ProcessVideo:
             self.a = data['param']['video']
             self.b = data['param']['transcribe']
             self.c = data['param']['ocr']
+
+            self.prompt_path = data['prompt']['main_prompt']
+
+    def _load_prompt(self) -> None:
+        with open(self.prompt_path, 'r') as f:
+            return f.read()
 
     def _clear_gpu_memory(self) -> None:
         if torch.cuda.is_available():
@@ -69,14 +78,19 @@ class ProcessVideo:
         return False
 
     def _extract_audio(self, video_path: str) -> bytes:
-        video = VideoFileClip(video_path)
-        audioname = f"{uuid.uuid4()}.mp3"
-        audio = video.audio
-        audio.write_audiofile(audioname)
+        audioname = f"data/{uuid.uuid4()}.mp3"
+        subprocess.run([
+            "ffmpeg",
+            "-y",
+            "-i", video_path,
+            "-vn",
+            "-acodec", "mp3",
+            audioname,
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return audioname
 
     def _process_audio(self) -> str:
-        self._audio_path = self._extract_audio(self.video_path)
+        self._audio_path = self._extract_audio('data/' + self.video_path)
 
         with open(self._audio_path, 'rb') as f:
             files = {'audio_file': f, "task": "transcribe", "output": "json"}
@@ -86,7 +100,6 @@ class ProcessVideo:
 
     def _process_video_sense(self) -> str:
         vllm_payload = {
-            #"model": "Qwen/Qwen3-VL-4B-Instruct",
             "model": self.video_model,
             "messages": [
                 {
@@ -100,13 +113,18 @@ class ProcessVideo:
         }
 
         visual_description = requests.post(self.qwen_video_url, json=vllm_payload).json()
-        #self._stop_service('vllm-qwen')
         return visual_description['choices'][0]['message']['content']
 
     def _process_ocr(self) -> str:
         result = []
         cap = cv2.VideoCapture('data/' + self.video_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
+
+        if int(fps) == 30:
+            divider = 10
+        else:
+            divider = 30
+
         count = 0
 
         while cap.isOpened():
@@ -115,13 +133,13 @@ class ProcessVideo:
             if not ret:
                 break
 
-            if count % 10 == 0:
+            if count % divider == 0:
                 if frame is not None:
                     _, img_encoded = cv2.imencode('.jpg', frame)
 
                     try:
                         response = requests.post(
-                            "http://0.0.0.0:8010/ocr",
+                            self.paddle_url,
                             files={"file": ("frame.jpg", img_encoded.tobytes(), "image/jpeg")}
                         )
                         result.append(" ".join(response.json()))
@@ -131,45 +149,79 @@ class ProcessVideo:
         
         result = " ".join(result)
 
+        cap.release()
+
+        return result
+
+    def _summarize_all(self, transcript: str, visual_desc: str, ocr_text: str) -> np.ndarray:
         payload = {
             "model": self.video_model,
             "messages": [
                 {
-                    "role": "system",
-                    "content": "You are a professional editor and analyst with expertise in OCR error correction."
-                },
-                {
                     "role": "user",
-                    "content": f"Clean:\n1.Analyze the provided OCR text and correct typos, character misrecognitions (e.g., '0' instead of 'O', '1' instead of 'l'), and punctuation errors. Ensure the text flows logically.\n2.Translate (if needed): If the text is not in English, translate the corrected version into fluent English.\n3.Summarize: Provide a concise summary of the key points in English.\n\nConstraints:\n1.Do not make up facts; if a word is completely illegible, mark it as [unintelligible].\n2.The summary should be structured (bullet points or a short paragraph).",
-                    "max_tokens": 1024
+                    "content": self.prompt
                 }
-            ]
+            ],
+            "temperature": 0.2,
+            "max_tokens": 800,
+            "response_format": {"type": "json_object"}
         }
 
-        ocr_description = requests.post(self.qwen_video_url, json=payload).json()
-        print(ocr_description['choices'][0]['message']['content'])
+        response = requests.post(self.qwen_video_url, json=payload).json()
 
-        cap.release()
+        result = response["choices"][0]["message"]["content"]
+
+        return result
+
+    def _normalize_weights(self, confidence) -> None:
+        visual = confidence['visual']
+        speech = confidence['speech']
+        ocr = confidence['ocr']
+
+        total = visual + speech + ocr
+
+        if total > 0:
+            self.visual_norm = visual / total
+            self.speech_norm = speech / total
+            self.ocr_norm = ocr / total
+        else:
+            self.visual_norm = self.a
+            self.speech_norm = self.b
+            self.ocr_norm = self.c
 
     def process_video(self):
-        self._process_ocr()
-       # print(self._get_embeddings())
-       # os.remove(self._audio_path)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            audio_future = executor.submit(self._process_audio)
+            video_future = executor.submit(self._process_video_sense)
+            ocr_future = executor.submit(self._process_ocr)
 
-    def _get_embeddings(self):
-        #self._start_service("embedding")
-        self._wait_for_service(self.embed_url.replace("/v1/embeddings", "health"))
+            transcript = audio_future.result()
+            visual_desc = video_future.result()
+            ocr_text = ocr_future.result()
 
-        video_sense_embedding = self.embedding.get_embedding(self._process_video_sense())
-        audio_sense_embedding = self.embedding.get_embedding(self._process_audio())
+        summary = json.loads(self._summarize_all(transcript, visual_desc, ocr_text))
+        self._normalize_weights(summary['confidence'])
+
+        print(self._get_embeddings(summary))
+
+        os.remove(self._audio_path)
+
+    def _get_embeddings(self, summary: dict[str, str]) -> float:
+        video_sense_embedding = self.embedding.get_embedding(summary['video_summary'])
+        audio_sense_embedding = self.embedding.get_embedding(summary['spoken_topics'])
+        ocr_embedding = self.embedding.get_embedding(summary['subtitle_meaning'])
+
+        overall_embedding = self.embedding.get_embedding(summary['overall_context'])
         description_embedding = self.embedding.get_embedding(self.video_description)
 
-        weighted = self.a * video_sense_embedding + self.b * audio_sense_embedding
+        weighted = self.visual_norm * video_sense_embedding +\
+        self.speech_norm * audio_sense_embedding +\
+        self.ocr_norm * ocr_embedding
 
         similarity = cosine_similarity([weighted], [description_embedding])[0][0]
-        self._stop_service("embedding")
-        return similarity
 
+        print(cosine_similarity([overall_embedding], [description_embedding])[0][0])
+        return similarity
 
 def main():
     video_path, description = get_video_pair()
