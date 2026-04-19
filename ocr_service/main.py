@@ -4,6 +4,8 @@ from fastapi.responses import JSONResponse
 from paddleocr import PaddleOCR
 from PIL import Image
 import io
+import cv2
+
 
 app = FastAPI(
     title="PaddleOCR API",
