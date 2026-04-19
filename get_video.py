@@ -21,8 +21,8 @@ def download_video(video_url: str) -> str | None:
     return None
 
 def get_video_pair() -> tuple[str, str]:
-   # rand_number = randrange(len(link))
-    rand_number = 19
+    rand_number = randrange(len(link))
     videoname = download_video(link[rand_number - 1])
     if videoname is not None:
+        print(rand_number, link[rand_number - 1])
         return f"{videoname}.mp4", description[rand_number - 1]
