@@ -1,14 +1,17 @@
 [config]
 whisper_url = "http://0.0.0.0:9000/asr"
 qwen_video_url = "http://localhost:8000/v1/chat/completions"
-embed_url = "http://localhost:8008/v1/embeddings"
+paddle_url = "http://localhost:8010/ocr"
+embed_url = "http://localhost:8888/embeddings"
 
 [model]
 video = "Qwen/Qwen3.5-2B"
 embed = "Qwen/Qwen3-Embedding-0.6B"
 
 [param]
-
 video = 0.5
 transcribe = 0.3
 ocr = 0.2
+
+[prompt]
+main_prompt = "prompts/main.prompt"
