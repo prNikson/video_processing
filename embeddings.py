@@ -10,16 +10,8 @@ class SimpleEmbedding:
         self.model_name = model_name
 
     def get_embedding(self, text: str) -> np.ndarray:
-        task = "Determine if the following text is semantically similar to another text"
-        formatted_text = f"Instruct: {task}\nQuery: {text}"
-
-        payload = {
-            "input": formatted_text,
-            "model": self.model_name
-        }
-
-        response = requests.post(self.vllm_url, json=payload)
+        response = requests.post(self.vllm_url, params={"text": text})
         response.raise_for_status()
 
-        embedding = response.json()["data"][0]["embedding"]
+        embedding = response.json()
         return np.array(embedding)
