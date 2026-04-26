@@ -66,18 +66,33 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
 
-  embedding:
-    build: ./embedding_service
-    container_name: qwen_embedding
+  reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:latest
+    container_name: bge_reranker
     ports:
-      - "8888:8888"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+      - "8080:8080"
+    command: --model-id BAAI/bge-reranker-v2-m3 --port 8080
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     restart: unless-stopped
+
+#  embedding:
+#    build: ./embedding_service
+#    container_name: qwen_embedding
+#    ports:
+#      - "8888:8888"
+#    healthcheck:
+#      test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 3
+#      start_period: 30s
+#    restart: unless-stopped
 
 networks:
   default:

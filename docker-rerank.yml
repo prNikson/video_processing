@@ -1,0 +1,19 @@
+services:
+  reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:latest
+    container_name: bge_reranker
+    ports:
+      - "7777:7777"
+    command: --model-id BAAI/bge-reranker-v2-m3 --port 7777
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+networks:
+  default:
+    name: ai_networks 

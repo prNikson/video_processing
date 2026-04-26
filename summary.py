@@ -23,9 +23,10 @@ class ProcessVideo:
         config_file='config.toml'
     ):
         self.video_path = video_path
-        self.video_description = description
+        self.video_description = str(description)
         self._read_config_file(config_file)
-        self.prompt = self._load_prompt()
+        self.prompt = self._load_prompt(self.main_prompt_path)
+        self.prepare_prompt = self._load_prompt(self.prepare_prompt_path)
 
     def _read_config_file(self, config_file) -> None:
         with open(config_file, 'rb') as f:
@@ -42,17 +43,12 @@ class ProcessVideo:
             self.b = data['param']['transcribe']
             self.c = data['param']['ocr']
 
-            self.prompt_path = data['prompt']['main_prompt']
+            self.main_prompt_path = data['prompt']['main_prompt']
+            self.prepare_prompt_path = data['prompt']['prepare_prompt']
 
-    def _load_prompt(self) -> None:
-        with open(self.prompt_path, 'r') as f:
+    def _load_prompt(self, path) -> None:
+        with open(path, 'r') as f:
             return f.read()
-
-    def _clear_gpu_memory(self) -> None:
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
     
     def _stop_service(self, service_name: str) -> None:
         subprocess.run(["docker-compose", "stop", service_name], capture_output=True)
@@ -170,6 +166,23 @@ class ProcessVideo:
 
         return result
 
+    def _prepare_query(self) -> str:
+        payload = {
+            "model": self.video_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": self.prepare_prompt.format(video_description=self.video_description)
+                }
+            ],
+            "temperature": 0.2,
+            "max_tokens": 800,
+            "response_format": {"type": "json_object"}
+        }
+        response = requests.post(self.qwen_video_url, json=payload).json()
+        result = json.loads(response["choices"][0]["message"]["content"])
+        return result['text']
+
     def _normalize_weights(self, confidence) -> None:
         visual = confidence['visual']
         speech = confidence['speech']
@@ -197,48 +210,22 @@ class ProcessVideo:
             ocr_text = ocr_future.result()
 
         summary = json.loads(self._summarize_all(transcript, visual_desc, ocr_text))
-        self._normalize_weights(summary['confidence'])
-
-        self._get_embeddings(summary)
+       # summary = ''
+        self._get_similarity(summary)
 
         os.remove(self._audio_path)
 
-    def _prepare_description(self):
-        print(self.video_description)
-        #self.video_description = self.video_description.replace("#", "")
+    def _get_similarity(self, summary: dict[str, str]) -> float:
+        print(self._prepare_query())
+        self.video_description = self._prepare_query()
+        payload = {
+            "query": str(self.video_description),
+            "texts": summary['keywords'] + summary['russian_keywords'] + [summary['overall_context']]
+        }
 
-    def _get_embeddings(self, summary: dict[str, str]) -> float:
-        print(summary)
-        print(self.video_description)
-        return
-        video_sense_embedding = self.embedding.get_embedding(summary['video_summary'])
-        audio_sense_embedding = self.embedding.get_embedding(summary['spoken_topics'])
-        ocr_embedding = self.embedding.get_embedding(summary['subtitle_meaning'])
+        response = requests.post(self.rerank_url, json=payload)
+        result = response.json()
+        print(result)
+        result.sort(key=lambda x: x['score'], reverse=True)
 
-        overall_embedding = self.embedding.get_embedding(summary['overall_context'])
-
-        self._prepare_description()
-        description_embedding = self.embedding.get_embedding(self.video_description)
-
-        weighted = self.visual_norm * video_sense_embedding +\
-        self.speech_norm * audio_sense_embedding +\
-        self.ocr_norm * ocr_embedding
-
-        print(summary)
-
-    # weighted similarity
-        weighted_similarity = cosine_similarity([weighted], [description_embedding])[0][0]
-        print("Weighted similarity:", weighted_similarity)
-
-    # only video similarity
-        print("Video similarity:", cosine_similarity([video_sense_embedding], [description_embedding])[0][0])
-
-    # only audio similarity
-        print("Audio similarity:", cosine_similarity([audio_sense_embedding], [description_embedding])[0][0])
-
-    #only ocr similarity
-        print("OCR similarity:", cosine_similarity([ocr_embedding], [description_embedding])[0][0])
-
-    # tags similarity
-        print("Overall context similarity:", cosine_similarity([overall_embedding], [description_embedding])[0][0])
-
+        print(result)
